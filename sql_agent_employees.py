@@ -9,6 +9,8 @@ import json
 import datetime
 
 class SQLAgent:
+    _schema_cache = None  # Class-level cache for schema
+
     def __init__(self, database_url: str, google_api_key: str):
         self.database_url = database_url
         self.google_api_key = google_api_key
@@ -18,7 +20,15 @@ class SQLAgent:
         genai.configure(api_key=google_api_key)
         self.model = genai.GenerativeModel('gemini-2.5-flash-preview-04-17')
         self._connect_to_db()
-        self._extract_schema_info()
+        if SQLAgent._schema_cache is None:
+            self._extract_schema_info()
+            SQLAgent._schema_cache = self.schema_info
+        else:
+            self.schema_info = SQLAgent._schema_cache
+
+    @classmethod
+    def clear_schema_cache(cls):
+        cls._schema_cache = None
 
     def _connect_to_db(self):
         try:
@@ -147,7 +157,7 @@ class SQLAgent:
                     "foreign_keys": foreign_keys
                 }
             self.schema_info = schema_info
-            print("\n=== Database Schema Info ===")
+            print("\n=== Database Schema Info Extracted ===")
         except Exception as e:
             print(f"Error extracting schema information: {e}")
             sys.exit(1)
@@ -179,8 +189,9 @@ class SQLAgent:
         """
         response = self.model.generate_content(prompt)
         sql_query = response.text.strip()
-        print(f"Generated SQL query: {sql_query}")
+      
         sql_query = re.sub(r'```sql|```', '', sql_query).strip()
+        print(f"Generated SQL query: {sql_query}")
         return sql_query
 
     def execute_query(self, sql_query: str) -> List[Dict[str, Any]]:

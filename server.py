@@ -1,3 +1,4 @@
+
 # file: api.py
 
 from fastapi import FastAPI, HTTPException, Request
@@ -79,6 +80,11 @@ async def get_schema():
         return agent.schema_info
     finally:
         agent.close()
+# Endpoint to clear the schema cache
+@app.post("/clear_schema_cache")
+async def clear_schema_cache():
+    SQLAgent.clear_schema_cache()
+    return {"detail": "Schema cache cleared. It will be reloaded on the next request."}
 
 @app.get("/health")
 async def health_check():
