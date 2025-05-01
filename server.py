@@ -44,6 +44,15 @@ async def log_requests(request: Request, call_next):
 
 @app.post("/query", response_model=QueryResponse)
 async def process_query(request: QueryRequest):
+    # Respond to greetings before any DB logic
+    if request.user_query.strip().lower() in ["hi", "hello" , "HELLO" , "HI"]:
+        return QueryResponse(
+            user_query=request.user_query,
+            sql_query="",
+            explanation="Hello! I am your SQL Agent. Ask me any question about your database in natural language.",
+            results=[{"": "Hello! I am your SQL Agent. Ask me any question about your database in natural language."}],
+            result_count=0
+        )
     database_url = os.getenv("DATABASE_URL", "your_employees_db_url_here")
     google_api_key = os.getenv("GOOGLE_API_KEY", "your_google_api_key_here")
     agent = SQLAgent(database_url, google_api_key)
