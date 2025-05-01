@@ -1,17 +1,20 @@
 # file: api.py
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.middleware.trustedhost import TrustedHostMiddleware
 from pydantic import BaseModel
 from typing import Dict, Any
 import os
+import logging
 from sql_agent_employees import SQLAgent
 
-# Define Request Model
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
 class QueryRequest(BaseModel):
     user_query: str
 
-# Define Response Model
 class QueryResponse(BaseModel):
     user_query: str
     sql_query: str
@@ -19,20 +22,24 @@ class QueryResponse(BaseModel):
     results: list
     result_count: int
 
-# Initialize FastAPI app
 app = FastAPI()
 
-# CORS settings (adjust origins as needed)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # TODO: Replace with your frontend domain in production
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# Global SQLAgent instance
 agent: SQLAgent = None
+
+@app.middleware("http")
+async def log_requests(request: Request, call_next):
+    logger.info(f"Incoming request: {request.method} {request.url}")
+    response = await call_next(request)
+    logger.info(f"Response status: {response.status_code}")
+    return response
 
 @app.on_event("startup")
 async def startup_event():
@@ -48,8 +55,14 @@ async def shutdown_event():
 
 @app.post("/query", response_model=QueryResponse)
 async def process_query(request: QueryRequest):
+    if agent is None:
+        raise HTTPException(status_code=503, detail="SQL Agent not initialized")
     try:
+        # Retry Gemini parsing once on failure
         result = agent.process_natural_language_query(request.user_query)
+        if result.get("status") == "failed" and "error" in result and "JSONDecodeError" in result["error"]:
+            logger.warning("Retrying Gemini query due to JSONDecodeError...")
+            result = agent.process_natural_language_query(request.user_query)
 
         if "error" in result:
             raise HTTPException(status_code=400, detail=result["error"])
@@ -62,8 +75,10 @@ async def process_query(request: QueryRequest):
             result_count=result["result_count"]
         )
 
+    except HTTPException:
+        raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
 
 @app.get("/schema", response_model=Dict[str, Any])
 async def get_schema():
@@ -71,6 +86,14 @@ async def get_schema():
         raise HTTPException(status_code=503, detail="Agent not initialized")
     return agent.schema_info
 
-# Run server with: `uvicorn api:app --reload`
+@app.get("/health")
+async def health_check():
+    try:
+        agent._ensure_connection()
+        return {"status": "ok"}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Health check failed: {str(e)}")
+
+# Run server with: `uvicorn server:app --reload`
 # (Make sure you install fastapi and uvicorn)
 # pip install fastapi uvicorn

@@ -29,6 +29,11 @@ class SQLAgent:
             print(f"Error connecting to the database: {e}")
             sys.exit(1)
 
+    def _ensure_connection(self):
+        if self.conn is None or self.conn.closed != 0:
+            print("Database connection lost. Reconnecting...")
+            self._connect_to_db()
+
     def _is_safe_query(self, sql_query: str) -> bool:
         forbidden_keywords = [
             "INSERT", "UPDATE", "DELETE", "DROP", "ALTER", "TRUNCATE", "CREATE", "REPLACE"
@@ -40,15 +45,8 @@ class SQLAgent:
             if re.search(rf'\b{keyword}\b', sql_upper):
                 return False
         return True
-    
+
     def _verify_natural_language_query(self, user_query: str) -> Dict[str, Any]:
-        """
-        Verifies if the input is a natural language query that is grammatically correct
-        and suitable for SQL generation.
-        
-        Returns:
-            Dict with verification result and feedback
-        """
         prompt = f"""
         Your task is to verify if the following input is a proper natural language query 
         that can be converted to an SQL query. Assess if it's grammatically correct, 
@@ -64,28 +62,21 @@ class SQLAgent:
         
         Only respond with the JSON.
         """
-        
         try:
             response = self.model.generate_content(prompt)
             result_text = response.text.strip()
-            
-            # Extract JSON from the response (in case model includes extra text)
             json_match = re.search(r'\{.*\}', result_text, re.DOTALL)
             if json_match:
                 result_text = json_match.group(0)
-            
             result = json.loads(result_text)
-            
-            # Ensure all expected fields are present
             result.setdefault("is_valid", False)
             result.setdefault("feedback", "Failed to validate query format")
             result.setdefault("improved_query", user_query)
-            
             return result
         except Exception as e:
             print(f"Error verifying natural language query: {e}")
             return {
-                "is_valid": True,  # Default to True on validation failure to not block user
+                "is_valid": True,
                 "feedback": f"Validation service experienced an error: {str(e)}",
                 "improved_query": user_query
             }
@@ -99,17 +90,14 @@ class SQLAgent:
             """)
             tables = self.cursor.fetchall()
             schema_info = {}
-
             for schema, table in tables:
                 full_table_name = f'"{schema}"."{table}"'
-
                 self.cursor.execute(f"""
                     SELECT column_name, data_type, udt_name
                     FROM information_schema.columns
                     WHERE table_schema = %s AND table_name = %s
                 """, (schema, table))
                 columns = self.cursor.fetchall()
-
                 column_defs = []
                 for col in columns:
                     enum_values = []
@@ -126,7 +114,6 @@ class SQLAgent:
                         "data_type": col[1],
                         "enum_values": enum_values
                     })
-
                 self.cursor.execute(f"""
                     SELECT a.attname
                     FROM pg_index i
@@ -136,7 +123,6 @@ class SQLAgent:
                       AND i.indisprimary
                 """, (f'"{schema}"."{table}"',))
                 primary_keys = [pk[0] for pk in self.cursor.fetchall()]
-
                 self.cursor.execute(f"""
                     SELECT kcu.column_name, ccu.table_schema, ccu.table_name, ccu.column_name
                     FROM information_schema.table_constraints AS tc
@@ -155,13 +141,11 @@ class SQLAgent:
                     }
                     for fk in foreign_keys
                 ]
-
                 schema_info[f"{schema}.{table}"] = {
                     "columns": column_defs,
                     "primary_keys": primary_keys,
                     "foreign_keys": foreign_keys
                 }
-
             self.schema_info = schema_info
             print("\n=== Database Schema Info ===")
         except Exception as e:
@@ -176,7 +160,6 @@ class SQLAgent:
 
     def _generate_sql_query(self, user_query: str) -> str:
         schema_json = json.dumps(self.schema_info, indent=2, default=self.default_serializer)
-
         prompt = f"""
         You are an expert SQL query generator. Based on the following PostgreSQL database schema and the user's question,
         generate the most appropriate SQL query.
@@ -194,7 +177,6 @@ class SQLAgent:
 
         Generate ONLY the SQL query without any explanations. Make sure the query follows PostgreSQL syntax.
         """
-
         response = self.model.generate_content(prompt)
         sql_query = response.text.strip()
         print(f"Generated SQL query: {sql_query}")
@@ -202,6 +184,7 @@ class SQLAgent:
         return sql_query
 
     def execute_query(self, sql_query: str) -> List[Dict[str, Any]]:
+        self._ensure_connection()
         try:
             self.cursor.execute(sql_query)
             rows = self.cursor.fetchall()
@@ -223,43 +206,32 @@ class SQLAgent:
             raise Exception(f"Error executing SQL query: {e}")
 
     def process_natural_language_query(self, user_query: str) -> Dict[str, Any]:
+        self._ensure_connection()
         try:
-            # First, verify if the input is a proper natural language query
             verification_result = self._verify_natural_language_query(user_query)
-            
-            # Always use the improved query if available
             actual_query = verification_result.get("improved_query", user_query)
-            
-            # Only return error if the query is invalid AND no improved version is available
             if not verification_result["is_valid"] and actual_query == user_query:
                 return {
                     "user_query": user_query,
                     "error": f"Invalid natural language query: {verification_result['feedback']}",
                     "status": "validation_failed"
                 }
-            
-            # If using an improved version, inform the user
             if actual_query != user_query:
                 print(f"Using improved query: {actual_query}")
-            
             sql_query = self._generate_sql_query(actual_query)
-            
             if not self._is_safe_query(sql_query):
                 return {
                     "user_query": user_query,
                     "error": "Unsafe SQL detected. Only read-only SELECT queries are allowed.",
                     "status": "failed"
                 }
-
             results = self.execute_query(sql_query)
-
             explanation_prompt = f"""
             Explain the following SQL query in simple terms, describing what it does:
             {sql_query}
             """
             explanation_response = self.model.generate_content(explanation_prompt)
             explanation = explanation_response.text.strip()
-
             return {
                 "user_query": user_query,
                 "processed_query": actual_query if actual_query != user_query else user_query,
@@ -282,36 +254,25 @@ class SQLAgent:
             self.conn.close()
             print("Database connection closed.")
 
-
 def main():
     database_url = os.environ.get("DATABASE_URL", "your_employees_db_url_here")
     google_api_key = os.environ.get("GOOGLE_API_KEY", "your_google_api_key_here")
-
     agent = SQLAgent(database_url, google_api_key)
-
     print("\n=== SQL Agent Ready ===")
     print("Type 'exit' to quit the application.")
-
     while True:
         user_input = input("\nEnter your query in natural language: ")
-
         if user_input.lower() in ['exit', 'quit', 'q']:
             agent.close()
             print("Thank you for using SQL Agent. Goodbye!")
             break
-
         try:
             result = agent.process_natural_language_query(user_input)
-
             if "error" in result:
                 print(f"\nError: {result['error']}")
-                # Automatically use the suggested query if available
                 if "suggested_query" in result and result["suggested_query"] != user_input:
                     print(f"Using suggested query instead: {result['suggested_query']}")
-                    # Reprocess with suggested query
                     result = agent.process_natural_language_query(result["suggested_query"])
-            
-            # Display results if no error or after using the suggested query
             if "error" not in result:
                 if result['results']:
                     headers = result['results'][0].keys()
@@ -323,10 +284,8 @@ def main():
                     print(f"\nQuery Explanation: {result['explanation']}")
                 else:
                     print("No results found.")
-
         except Exception as e:
             print(f"Error processing query: {e}")
-
 
 if __name__ == "__main__":
     main()
