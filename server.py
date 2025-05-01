@@ -41,22 +41,11 @@ async def log_requests(request: Request, call_next):
     logger.info(f"Response status: {response.status_code}")
     return response
 
-@app.on_event("startup")
-async def startup_event():
-    global agent
+@app.post("/query", response_model=QueryResponse)
+async def process_query(request: QueryRequest):
     database_url = os.getenv("DATABASE_URL", "your_employees_db_url_here")
     google_api_key = os.getenv("GOOGLE_API_KEY", "your_google_api_key_here")
     agent = SQLAgent(database_url, google_api_key)
-
-@app.on_event("shutdown")
-async def shutdown_event():
-    if agent:
-        agent.close()
-
-@app.post("/query", response_model=QueryResponse)
-async def process_query(request: QueryRequest):
-    if agent is None:
-        raise HTTPException(status_code=503, detail="SQL Agent not initialized")
     try:
         # Retry Gemini parsing once on failure
         result = agent.process_natural_language_query(request.user_query)
@@ -74,25 +63,35 @@ async def process_query(request: QueryRequest):
             results=result["results"],
             result_count=result["result_count"]
         )
-
     except HTTPException:
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
+    finally:
+        agent.close()
 
 @app.get("/schema", response_model=Dict[str, Any])
 async def get_schema():
-    if not agent:
-        raise HTTPException(status_code=503, detail="Agent not initialized")
-    return agent.schema_info
+    database_url = os.getenv("DATABASE_URL", "your_employees_db_url_here")
+    google_api_key = os.getenv("GOOGLE_API_KEY", "your_google_api_key_here")
+    agent = SQLAgent(database_url, google_api_key)
+    try:
+        return agent.schema_info
+    finally:
+        agent.close()
 
 @app.get("/health")
 async def health_check():
+    database_url = os.getenv("DATABASE_URL", "your_employees_db_url_here")
+    google_api_key = os.getenv("GOOGLE_API_KEY", "your_google_api_key_here")
+    agent = SQLAgent(database_url, google_api_key)
     try:
         agent._ensure_connection()
         return {"status": "ok"}
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Health check failed: {str(e)}")
+    finally:
+        agent.close()
 
 # Run server with: `uvicorn server:app --reload`
 # (Make sure you install fastapi and uvicorn)
